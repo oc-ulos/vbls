@@ -72,12 +72,60 @@ local function findCommand(name)
   return nil, "command not found"
 end
 
+local whitespace = { [" "] = true, ["\n"] = true, ["\t"] = true }
+
+-- VBLS follows the same quoting rules as Plan 9's rc:
+--  'this is a valid quoted string'
+--  'you're wrong if you think this is'
+--  'but you''re correct if you think this is'
+--  "and this isn't"
 local function tokenize(chunk)
   local tokens = {""}
+  local in_string = false
+  local prev_char
 
   for c in chunk:gmatch(".") do
-    if c == 
+    if in_string then
+      if c == "'" then
+        in_string = false
+      else
+        tokens[#tokens] = tokens[#tokens] .. c
+      end
+
+    else
+
+      if whitespace[c] and #tokens[#tokens] > 0 then
+        tokens[#tokens+1] = ""
+
+      elseif c == "'" then
+        in_string = true
+        if prev_char == c then
+          tokens[#tokens] = tokens[#tokens] .. c
+        end
+
+      else
+        if c == ";" then
+          if #tokens[#tokens] > 0 then
+            tokens[#tokens+1] = c
+
+          else
+            tokens[#tokens] = c
+          end
+
+          tokens[#tokens+1] = ""
+        end
+
+      end
+    end
+
+    prev_char = c
   end
+
+  if in_string then
+    return nil, "unfinished string"
+  end
+
+  return tokens
 end
 
 local function evaluateChunk()
