@@ -37,13 +37,13 @@ end
 
 local wait = require("posix.sys.wait").wait
 local errno = require("posix.errno")
-local stdio = require("posix.stdio")
 local stdlib = require("posix.stdlib")
 local readline = require("readline")
 
 local args, opts = require("getopt").getopt({
   options = {
     h = false, help = false,
+    v = false, version = false,
     c = true, login = false,
     e = false, x = false,
   },
@@ -52,13 +52,35 @@ local args, opts = require("getopt").getopt({
   help_message = argv[0] .. ": pass '--help' for usage information\n"
 }, argv)
 
+if opts.h or opts.help then
+  io.stderr:write([=[
+usage: vbls [options] [script [arguments ...]]
+The Vaguely Bourne-Like Shell.  Theoretically saner than Bash.  See vbls(1) for
+detailed information on syntax and whatnot.
+
+  -c STRING     Execute STRING and exit.
+  -e            Set shell option 'errexit'
+  -x            Set shell option 'showcommands'
+  --login       Specify that this VBLS is a login shell
+  -h,--help     Show this message
+  -v,--version  Print the shell version
+
+Copyright (c) 2022 ULOS Developers under the GNU GPLv3.
+]=])
+  os.exit(0)
+end
+
+if opts.v or opts.version then
+  print("VBLS ".._VBLS_VERSION)
+end
+
 local defaultPath = "/bin:/sbin:/usr/bin"
 
 local commandPaths = {}
 local shopts = {
   cachepaths = true,
-  errexit = false,
-  showcommands = false
+  errexit = not not opts.e,
+  showcommands = not not opts.x
 }
 
 -- some default environment setup
@@ -79,7 +101,23 @@ local function writeError(err, ...)
   io.stderr:flush()
 end
 
+local function unexpected(token, near)
+  if near then
+    return string.format("unexpected '%s' near '%s'", token, near)
+  else
+    return string.format("unexpected '%s'", token)
+  end
+end
+
+
 local builtins = {}
+--local aliases = {}
+
+function builtins.alias()
+end
+
+function builtins.unalias()
+end
 
 function builtins.printf(argt, input, output)
   if #argt == 0 then
@@ -104,6 +142,17 @@ function builtins.echo(argt, _, output)
     if i < #argt then outstr = outstr .. " " end
   end
   unistd.write(output, outstr.."\n")
+  return 0
+end
+
+-- like echo, but delimits exclusively with a newline
+function builtins.echo_nl(argt, _, output)
+  output = output or 1
+  local outstr = ""
+  for i=1, #argt, 1 do
+    outstr = outstr .. tostring(argt[i]) .. "\n"
+  end
+  unistd.write(output, outstr)
   return 0
 end
 
@@ -206,11 +255,25 @@ local escapes = {
 --  "and this isn't"
 local function tokenize(chunk)
   local tokens = {""}
-  local in_string = false
+  local in_string, in_subst, subst_level = false, false, 0
   local prev_char
 
   for c in chunk:gmatch(".") do
-    if in_string then
+    if in_subst then
+      tokens[#tokens] = tokens[#tokens] .. c
+
+      if c == ")" then
+        subst_level = subst_level - 1
+
+        if subst_level <= 0 then
+          in_subst = false
+        end
+
+      elseif c == "(" and prev_char == "$" then
+        subst_level = subst_level + 1
+      end
+
+    elseif in_string then
       if prev_char == "\\" then
         if escapes[c] then
           tokens[#tokens] = tokens[#tokens] .. escapes[c]
@@ -233,6 +296,15 @@ local function tokenize(chunk)
           tokens[#tokens+1] = ""
         end
 
+      elseif prev_char == "$" and c == "(" then
+        if #tokens[#tokens] > 1 then
+          return nil, unexpected("$(", tokens[#tokens])
+        end
+
+        tokens[#tokens] = tokens[#tokens] .. c
+        in_subst = true
+        subst_level = 1
+
       elseif c == "'" then
         in_string = true
         if prev_char == c then
@@ -244,7 +316,7 @@ local function tokenize(chunk)
           tokens[#tokens+1] = "SPLIT"..c.."SPLIT"
 
         else
-          tokens[#tokens] = c
+          tokens[#tokens] = "SPLIT"..c.."SPLIT"
         end
 
         tokens[#tokens+1] = ""
@@ -261,19 +333,15 @@ local function tokenize(chunk)
     return nil, "unfinished string near '"..tokens[#tokens].."'"
   end
 
+  if in_subst then
+    return nil, "unfinished substitution near '"..tokens[#tokens].."'"
+  end
+
   if #tokens[#tokens] == 0 and prev_char ~= "'" then
     tokens[#tokens] = nil
   end
 
   return tokens
-end
-
-local function unexpected(token, near)
-  if near then
-    return string.format("unexpected '%s' near '%s'", token, near)
-  else
-    return string.format("unexpected '%s'", token)
-  end
 end
 
 local increase = {["if"] = true, ["for"] = true, ["while"] = true}
@@ -322,16 +390,47 @@ end
 local separatorOperators = { ["|"] = true, ["||"] = true,
   ["&&"] = true }
 
+local evaluateChunk
+
 -- Takes a single command and evaluates it.  If `input` or `output` is set,
 -- the command's standard input or output will automatically redirect to
 -- the file descriptors to which they point.
 local function evaluateCommand(command)
-  for i=1, #command, 1 do
-    command[i] = command[i]:gsub("%$(%b{})", function(v)
-      return os.getenv((v:sub(2,-2))) or ""
-    end):gsub("%$([%w_]+)", function(v)
-      return os.getenv(v) or ""
-    end)
+  local i = 1
+  while command[i] do
+    if not command[i] then break end
+
+    if command[i]:sub(1,2) == "$(" and command[i]:sub(-1) == ")" then
+      local result, output = evaluateChunk(command[i]:sub(3,-2), true)
+
+      local insert = {}
+
+      if result and output then
+        for line in output:gmatch("[^\n]+") do
+          insert[#insert+1] = line
+        end
+      end
+
+      table.remove(command, i)
+
+      for n=#insert, 1, -1 do
+        table.insert(command, i, insert[n])
+      end
+
+      i = i + #insert
+
+    elseif command[i] == "SPLIT;SPLIT" then
+      table.remove(command, i)
+
+    else
+      command[i] = command[i]:gsub("%$(%b{})", function(v)
+        return os.getenv((v:sub(2,-2))) or ""
+      end):gsub("%$([%w_]+)", function(v)
+        return os.getenv(v) or ""
+      end)
+
+      i = i + 1
+    end
   end
 
   local path, err = findCommand(command[1])
@@ -368,6 +467,10 @@ end
 -- Take a command chain, e.g 'a && b || c', and process it.
 local function evaluateCommandChain(tokens, flags)
   local commands = {{}}
+
+  if type(flags) == "boolean" then
+    flags = { output = flags }
+  end
 
   for i=1, #tokens, 1 do
     if separatorOperators[tokens[i]] then
@@ -437,9 +540,11 @@ end
 
 -- Takes a set of tokens and evaluates them.  This is where things like
 -- flow control happen.
-local function evaluateTokens(tokens)
+local function evaluateTokens(tokens, captureOutput)
   local i = 1
   local currentCommand = {}
+
+  local commandoutput = ""
 
   while tokens[i] do
     local token = tokens[i]
@@ -453,9 +558,10 @@ local function evaluateTokens(tokens)
         return
       end
 
-      local result, _err = evaluateCommandChain(command)
+      local result, _err = evaluateCommandChain(command, captureOutput)
 
-      if _err then writeError(_err) end
+      if not result and _err then writeError(_err) end
+      if captureOutput then commandoutput = commandoutput .. _err end
 
       if result ~= 0 then
         i = seekBalanced(tokens, i, "else", "elseif", "end")
@@ -470,17 +576,24 @@ local function evaluateTokens(tokens)
           local elseblock
           i, elseblock = seekBalanced(tokens, i, "end")
 
-          local _result, __err = evaluateTokens(elseblock)
+          local _result, __err = evaluateTokens(elseblock, captureOutput)
           if not _result then return nil, __err end
+          if captureOutput then commandoutput = commandoutput .. __err end
         end
 
       else
         local ifblock
         i, ifblock = seekBalanced(tokens, i, "else", "elseif", "end")
+
+        if not i then
+          return writeError("could not find matching else/elseif/end")
+        end
+
         if tokens[i-1] ~= "end" then i = seekBalanced(tokens, i, "end") end
 
-        local _result, __err = evaluateTokens(ifblock)
+        local _result, __err = evaluateTokens(ifblock, captureOutput)
         if not _result then return nil, __err end
+        if captureOutput then commandoutput = commandoutput .. __err end
       end
 
     elseif token == "else" then
@@ -502,6 +615,7 @@ local function evaluateTokens(tokens)
         return writeError("expected 'in' near '%s'", tokens[i-1])
       end
 
+      table.insert(command, 1, "echo_nl")
       local result, output = evaluateCommandChain(command,
         { output = true })
 
@@ -512,8 +626,9 @@ local function evaluateTokens(tokens)
 
         for line in output:gmatch("[^\n]+") do
           stdlib.setenv(varname, line)
-          local _result, _err = evaluateTokens(forblock)
+          local _result, _output = evaluateTokens(forblock, captureOutput)
           if not _result then break end
+          commandoutput = commandoutput .. (_output or "")
         end
 
         stdlib.setenv(varname, old)
@@ -522,8 +637,11 @@ local function evaluateTokens(tokens)
       end
 
     elseif token == "while" then
-      local command
-      i, command = readTo(tokens, i, "do")
+      return writeError("'while' is not yet supported")
+      --local command
+      --i, command = readTo(tokens, i, "do")
+
+      -- TODO: do something here
 
     elseif token == "end" then
       return writeError(unexpected("end", tokens[i-1]))
@@ -540,7 +658,7 @@ local function evaluateTokens(tokens)
       end
 
       if #currentCommand > 0 then
-        local result, err = evaluateCommandChain(currentCommand)
+        local result, err = evaluateCommandChain(currentCommand, captureOutput)
         currentCommand = {}
 
         if result ~= 0 then
@@ -551,6 +669,8 @@ local function evaluateTokens(tokens)
             return
           end
         end
+
+        if captureOutput then commandoutput = commandoutput .. err end
       end
 
     else
@@ -560,11 +680,11 @@ local function evaluateTokens(tokens)
     i = i + 1
   end
 
-  return true
+  return true, captureOutput and commandoutput
 end
 
 -- Takes a chunk and evaluates it.
-local function evaluateChunk(chunk)
+evaluateChunk = function(chunk, captureOutput)
   chunk = chunk
     -- strip spaces at the beginning
     :gsub("^ *", "")
@@ -576,7 +696,7 @@ local function evaluateChunk(chunk)
     writeError(err)
     return
   end
-  return evaluateTokens(tokens)
+  return evaluateTokens(tokens, captureOutput)
 end
 
 function builtins.source(argt)
