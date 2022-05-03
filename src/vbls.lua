@@ -37,6 +37,7 @@ end
 
 local wait = require("posix.sys.wait").wait
 local errno = require("posix.errno")
+local libgen = require("posix.libgen")
 local stdlib = require("posix.stdlib")
 local readline = require("readline")
 
@@ -92,6 +93,7 @@ stdlib.setenv("VBLS_VERSION", _VBLS_VERSION)
 stdlib.setenv("HOME", os.getenv("HOME") or "/")
 stdlib.setenv("SHLVL",
   tostring(math.floor(tonumber(os.getenv("SHLVL") or 0) + 1)))
+stdlib.setenv("PWD", unistd.getcwd())
 
 -- builtins
 local function writeError(err, ...)
@@ -156,6 +158,40 @@ function builtins.echo_nl(argt, _, output)
   return 0
 end
 
+function builtins.set(argt)
+  if #argt == 0 then
+    for k, v in pairs(stdlib.getenv()) do
+      print(tostring(k).."="..v:gsub("%c", function(cc)
+        if cc == "\27" then cc = "\5" end
+        return "\\" .. string.char(cc:byte() + 96)
+      end))
+    end
+  else
+    local _args, _opts = require("getopt").getopt({ options={},
+      allow_finish=true }, argt)
+
+    if #_args == 1 or _opts.help then
+      writeError("set: usage: set [options] [VAR VAL]")
+      if opts.help then
+        io.stderr:write([[
+  -n                negate others
+  -e,--errexit      exit on error
+  -x,--showcommand  show executed commands
+     --cachepaths   cache command paths]])
+      end
+      return 1
+    end
+
+    if _opts.e or _opts.errexit then shopts.errexit = not opts.n end
+    if _opts.x or _opts.showcommand then shopts.showcommand = not _opts.n end
+    if _opts.cachepaths then shopts.cachepaths = not _opts.n end
+
+    stdlib.setenv(_args[1], table.concat(_args, " ", 2))
+  end
+
+  return 0
+end
+
 function builtins.cd(argt)
   local to
 
@@ -185,15 +221,15 @@ function builtins.cd(argt)
     to = argt[1]
   end
 
-  local eno
-  to, eno = stdlib.realpath(to)
+  local realto, eno = stdlib.realpath(to)
 
-  if not to then
+  if not realto then
     writeError("cd: %s: %s", to, eno)
+    return 1
   end
 
   local oldwd = unistd.getcwd()
-  local ok, err = unistd.chdir(to)
+  local ok, err = unistd.chdir(realto)
   if not ok then
     writeError("cd: %s: %s", to, err)
     return 1
@@ -203,6 +239,10 @@ function builtins.cd(argt)
   stdlib.setenv("PWD", to)
 
   return 0
+end
+
+function builtins.equals(argt)
+  return argt[1] == argt[2] and 0 or 1
 end
 
 local function subFindCommand(path, name)
@@ -255,11 +295,36 @@ local escapes = {
 --  "and this isn't"
 local function tokenize(chunk)
   local tokens = {""}
-  local in_string, in_subst, subst_level = false, false, 0
+  local in_string, in_comment, in_subst, subst_level = false, false, false, 0
   local prev_char
 
   for c in chunk:gmatch(".") do
-    if in_subst then
+    if in_comment then
+      in_comment = c ~= "\n"
+      if #tokens[#tokens] > 0 then
+        tokens[#tokens+1] = ""
+      end
+
+    elseif in_string then
+      if prev_char == "\\" then
+        if escapes[c] then
+          tokens[#tokens] = tokens[#tokens] .. escapes[c]
+          c = "ESCAPED"
+        else
+          tokens[#tokens] = tokens[#tokens] .. "\\" .. c
+        end
+
+      elseif c == "'" then
+        in_string = false
+
+      elseif c ~= "\\" then
+        tokens[#tokens] = tokens[#tokens] .. c
+      end
+
+    elseif c == "#" then
+      in_comment = true
+
+    elseif in_subst then
       tokens[#tokens] = tokens[#tokens] .. c
 
       if c == ")" then
@@ -273,21 +338,6 @@ local function tokenize(chunk)
         subst_level = subst_level + 1
       end
 
-    elseif in_string then
-      if prev_char == "\\" then
-        if escapes[c] then
-          tokens[#tokens] = tokens[#tokens] .. escapes[c]
-          c = "ESCAPED"
-        else
-          return nil, "bad escape '"..c.."'"
-        end
-
-      elseif c == "'" then
-        in_string = false
-
-      elseif c ~= "\\" then
-        tokens[#tokens] = tokens[#tokens] .. c
-      end
 
     else
 
@@ -519,7 +569,18 @@ local function evaluateCommandChain(tokens, flags)
       if finalOutput then unistd.close(finalOutput) end
       return nil, err
     else
-      last_result = result
+      if operator == "||" then
+        if last_result == 0 or result == 0 then
+          last_result = 0
+        else
+          last_result = result
+        end
+      else
+        last_result = result
+        if operator == "&&" and result ~= 0 then
+          break
+        end
+      end
     end
     i = i + 1
   end
@@ -688,8 +749,6 @@ evaluateChunk = function(chunk, captureOutput)
   chunk = chunk
     -- strip spaces at the beginning
     :gsub("^ *", "")
-    -- strip comments
-    :gsub("#[^\n]*", "")
   if #chunk == 0 then return end
   local tokens, err = tokenize(chunk)
   if not tokens then
@@ -745,6 +804,18 @@ if to_source then
   builtins.source{to_source}
 end
 
+local utsname = require("posix.sys.utsname")
+local function prompt(p)
+  return (p
+    :gsub("\\W", libgen.basename(unistd.getcwd()))
+    :gsub("\\w", unistd.getcwd())
+    :gsub("\\h", utsname.uname().sysname)
+    :gsub("\\v", _VBLS_VERSION)
+    :gsub("\\s", "vbls")
+    :gsub("\\u", os.getenv("USER"))
+  )
+end
+
 local _rl_opts = { history = history, exit = function()
   -- save history on shell exit
   local handle, err = io.open(os.getenv("HOME").."/.vbls_history", "w")
@@ -758,6 +829,6 @@ local _rl_opts = { history = history, exit = function()
 end }
 
 while true do
-  io.write("% ")
+  io.write(prompt(os.getenv("PS1") or "% "))
   evaluateChunk(readline(_rl_opts))
 end
