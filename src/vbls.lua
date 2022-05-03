@@ -35,9 +35,9 @@ else
   end
 end
 
-local stat = require("posix.sys.stat")
 local wait = require("posix.sys.wait").wait
 local errno = require("posix.errno")
+local stdio = require("posix.stdio")
 local stdlib = require("posix.stdlib")
 local readline = require("readline")
 
@@ -71,15 +71,12 @@ stdlib.setenv("HOME", "/", true)
 
 local function subFindCommand(path, name)
   local test1 = stdlib.realpath(path .. "/" .. name)
-  local test2 = test1 .. ".lua"
+  local test2 = stdlib.realpath(path .. "/" .. name .. ".lua")
 
-  local statx, cpath = stat.lstat(test1), test1
-  if not statx then
-    statx, cpath = stat.lstat(test2), test2
-  end
-
-  if statx then
-    return statx, cpath
+  if test1 then
+    return test1
+  elseif test2 then
+    return test2
   else
     return nil, name .. ": command not found"
   end
@@ -95,8 +92,8 @@ local function findCommand(name)
   end
 
   for search in path:gmatch("[^:]+") do
-    local statx, cpath = subFindCommand(search, name)
-    if statx then
+    local cpath = subFindCommand(search, name)
+    if cpath then
       if shopts.cachepath then commandPaths[name] = cpath end
       return cpath
     end
@@ -239,12 +236,17 @@ local function evaluateCommand(command)
       unistd.dup2(command.output, 1)
       unistd.close(command.output)
     end
+
     local _, _err, _errno = unistd.exec(path, argt)
     io.stderr:write(("vbls: %s: %s\n"):format(path, _err))
     os.exit(_errno)
   end)
 
-  local _, _, status = wait(pid)
+  if command.input then unistd.close(command.input) end
+  if command.output then unistd.close(command.output) end
+
+  local _, result, status = wait(pid)
+  print(result, status)
   return status
 end
 
@@ -277,13 +279,18 @@ local function evaluateCommandChain(tokens)
 
     local operator = commands[i]
     if operator == "|" then
-      cmd.output = prog_out
-      commands[#commands+1].input = prog_in
+      cmd.output = prog_in
+      commands[i+1].input = prog_out
     end
 
     local result, err = evaluateCommand(cmd)
     unistd.close(prog_out)
     unistd.close(prog_in)
+    if not result then
+      return nil, err
+    elseif result ~= 0 then
+      return nil, "nonzero exit status"
+    end
     i = i + 1
   end
 end
@@ -299,7 +306,7 @@ local function evaluateTokens(tokens)
       local command
       i, command = readTo(tokens, i, "then")
 
-      if tokens[i] ~= "then" then
+      if tokens[i-1] ~= "then" then
         writeError("missing 'then' near '%s'", tokens[i - 1])
         return
       end
@@ -370,9 +377,13 @@ local function evaluateTokens(tokens)
         local result, err = evaluateCommandChain(currentCommand)
         currentCommand = {}
 
-        if result ~= 0 and shopts.errexit then
-          os.exit(1)
-          return
+        if result ~= 0 then
+          if shopts.errexit then
+            os.exit(1)
+          else
+            if err then writeError("%s", err) end
+            return
+          end
         end
       end
 
