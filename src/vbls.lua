@@ -78,7 +78,7 @@ local function subFindCommand(path, name)
   elseif test2 then
     return test2
   else
-    return nil, name .. ": command not found"
+    return nil
   end
 end
 
@@ -99,7 +99,7 @@ local function findCommand(name)
     end
   end
 
-  return nil, "command not found"
+  return nil, name .. ": command not found"
 end
 
 local whitespace = { [" "] = true, ["\n"] = true, ["\t"] = true }
@@ -229,12 +229,12 @@ local function evaluateCommand(command)
 
   local pid = fork(function()
     if command.input then
-      unistd.dup2(command.input, 0)
-      unistd.close(command.input)
+      assert(unistd.dup2(command.input, 0))
+      --unistd.close(command.input)
     end
     if command.output then
-      unistd.dup2(command.output, 1)
-      unistd.close(command.output)
+      assert(unistd.dup2(command.output, 1))
+      --unistd.close(command.output)
     end
 
     local _, _err, _errno = unistd.exec(path, argt)
@@ -243,10 +243,8 @@ local function evaluateCommand(command)
   end)
 
   if command.input then unistd.close(command.input) end
-  if command.output then unistd.close(command.output) end
 
   local _, result, status = wait(pid)
-  print(result, status)
   return status
 end
 
@@ -284,8 +282,8 @@ local function evaluateCommandChain(tokens)
     end
 
     local result, err = evaluateCommand(cmd)
-    unistd.close(prog_out)
     unistd.close(prog_in)
+    if operator ~= "|" then unistd.close(prog_out) end
     if not result then
       return nil, err
     elseif result ~= 0 then
