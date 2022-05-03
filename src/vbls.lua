@@ -245,6 +245,13 @@ function builtins.equals(argt)
   return argt[1] == argt[2] and 0 or 1
 end
 
+function builtins.builtins(_, _, output)
+  local b = {}
+  for k in pairs(builtins) do b[#b+1] = k end
+  unistd.write(output, table.concat(b, "\n"))
+  return 0
+end
+
 local function subFindCommand(path, name)
   local test1 = stdlib.realpath(path .. "/" .. name)
   local test2 = stdlib.realpath(path .. "/" .. name .. ".lua")
