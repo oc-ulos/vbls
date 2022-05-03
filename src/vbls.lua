@@ -67,7 +67,45 @@ for i=1, #args, 1 do
   stdlib.setenv(tostring(i), tostring(args[i]))
 end
 stdlib.setenv("VBLS_VERSION", _VBLS_VERSION)
-stdlib.setenv("HOME", "/", true)
+stdlib.setenv("HOME", os.getenv("HOME") or "/")
+stdlib.setenv("SHLVL",
+  tostring(math.floor(tonumber(os.getenv("SHLVL") or 0) + 1)))
+
+-- builtins
+local function writeError(err, ...)
+  io.stdout:flush()
+  if type(err) == "number" then err = errno.errno(err) end
+  io.stderr:write("vbls: ", string.format(err, ...), "\n")
+  io.stderr:flush()
+end
+
+local builtins = {}
+
+function builtins.printf(argt, input, output)
+  if #argt == 0 then
+    writeError("usage: printf format [arguments]")
+    return 1
+  end
+  local ok, err = pcall(string.format, table.unpack(argt))
+  if ok then
+    builtins.echo({err}, input, output)
+  else
+    writeError("printf: %s", err)
+    return 1
+  end
+  return 0
+end
+
+function builtins.echo(argt, _, output)
+  output = output or 1
+  local outstr = ""
+  for i=1, #argt, 1 do
+    outstr = outstr .. tostring(argt[i])
+    if i < #argt then outstr = outstr .. " " end
+  end
+  unistd.write(output, outstr.."\n")
+  return 0
+end
 
 local function subFindCommand(path, name)
   local test1 = stdlib.realpath(path .. "/" .. name)
@@ -84,6 +122,7 @@ end
 
 local function findCommand(name)
   local path = os.getenv("PATH") or defaultPath
+  if builtins[name] then return true end
   if shopts.cachepaths and commandPaths[name] then
     return commandPaths[name] end
 
@@ -103,6 +142,13 @@ local function findCommand(name)
 end
 
 local whitespace = { [" "] = true, ["\n"] = true, ["\t"] = true }
+local escapes = {
+  ["\\"] = "\\",
+  n = "\n",
+  t = "\t",
+  e = "\27",
+  a = "\a",
+}
 
 -- VBLS follows the same quoting rules as Plan 9's rc:
 --  'this is a valid quoted string'
@@ -116,16 +162,27 @@ local function tokenize(chunk)
 
   for c in chunk:gmatch(".") do
     if in_string then
-      if c == "'" then
+      if prev_char == "\\" then
+        if escapes[c] then
+          tokens[#tokens] = tokens[#tokens] .. escapes[c]
+          c = "ESCAPED"
+        else
+          return nil, "bad escape '"..c.."'"
+        end
+
+      elseif c == "'" then
         in_string = false
-      else
+
+      elseif c ~= "\\" then
         tokens[#tokens] = tokens[#tokens] .. c
       end
 
     else
 
-      if whitespace[c] and #tokens[#tokens] > 0 then
-        tokens[#tokens+1] = ""
+      if whitespace[c] then
+        if #tokens[#tokens] > 0 then
+          tokens[#tokens+1] = ""
+        end
 
       elseif c == "'" then
         in_string = true
@@ -135,7 +192,7 @@ local function tokenize(chunk)
 
       elseif c == ";" or c == "\n" then
         if #tokens[#tokens] > 0 then
-          tokens[#tokens+1] = c
+          tokens[#tokens+1] = "SPLIT"..c.."SPLIT"
 
         else
           tokens[#tokens] = c
@@ -143,7 +200,7 @@ local function tokenize(chunk)
 
         tokens[#tokens+1] = ""
 
-      else
+      elseif c ~= "\\" then
         tokens[#tokens] = tokens[#tokens] .. c
       end
     end
@@ -155,14 +212,11 @@ local function tokenize(chunk)
     return nil, "unfinished string near '"..tokens[#tokens].."'"
   end
 
-  return tokens
-end
+  if #tokens[#tokens] == 0 and prev_char ~= "'" then
+    tokens[#tokens] = nil
+  end
 
-local function writeError(err, ...)
-  io.stdout:flush()
-  if type(err) == "number" then err = errno.errno(err) end
-  io.stderr:write("vbls: ", string.format(err, ...), "\n")
-  io.stderr:flush()
+  return tokens
 end
 
 local function unexpected(token, near)
@@ -219,36 +273,51 @@ end
 local separatorOperators = { ["|"] = true, ["||"] = true,
   ["&&"] = true }
 
--- TODO: builtin commands
+-- Takes a single command and evaluates it.  If `input` or `output` is set,
+-- the command's standard input or output will automatically redirect to
+-- the file descriptors to which they point.
 local function evaluateCommand(command)
+  for i=1, #command, 1 do
+    command[i] = command[i]:gsub("%$(%b{})", function(v)
+      return os.getenv((v:sub(2,-2))) or ""
+    end):gsub("%$([%w_]+)", function(v)
+      return os.getenv(v) or ""
+    end)
+  end
+
   local path, err = findCommand(command[1])
   if not path then return nil, err end
 
   local argt = {table.unpack(command, 2)}
   argt[0] = command[1]
 
-  local pid = fork(function()
-    if command.input then
-      assert(unistd.dup2(command.input, 0))
-      --unistd.close(command.input)
-    end
-    if command.output then
-      assert(unistd.dup2(command.output, 1))
-      --unistd.close(command.output)
-    end
+  if builtins[argt[0]] then
+    return builtins[argt[0]](argt, command.input, command.output)
+  else
+    local pid = fork(function()
+      if command.input then
+        assert(unistd.dup2(command.input, 0))
+        --unistd.close(command.input)
+      end
+      if command.output then
+        assert(unistd.dup2(command.output, 1))
+        --unistd.close(command.output)
+      end
 
-    local _, _err, _errno = unistd.exec(path, argt)
-    io.stderr:write(("vbls: %s: %s\n"):format(path, _err))
-    os.exit(_errno)
-  end)
+      local _, _err, _errno = unistd.exec(path, argt)
+      io.stderr:write(("vbls: %s: %s\n"):format(path, _err))
+      os.exit(_errno)
+    end)
 
-  if command.input then unistd.close(command.input) end
+    if command.input then unistd.close(command.input) end
 
-  local _, result, status = wait(pid)
-  return status
+    local _, _, status = wait(pid)
+    return status
+  end
 end
 
-local function evaluateCommandChain(tokens)
+-- Take a command chain, e.g 'a && b || c', and process it.
+local function evaluateCommandChain(tokens, flags)
   local commands = {{}}
 
   for i=1, #tokens, 1 do
@@ -269,7 +338,15 @@ local function evaluateCommandChain(tokens)
     return nil, "expected command near <eof>"
   end
 
+  local finalOutput, finalInput
+
+  if flags and flags.output then
+    finalOutput, finalInput = unistd.pipe()
+    commands[#commands].output = finalInput
+  end
+
   local i = 1
+  local last_result = 0
   while commands[i] do
     local cmd = commands[i]
     local prog_out, prog_in = unistd.pipe()
@@ -283,16 +360,34 @@ local function evaluateCommandChain(tokens)
 
     local result, err = evaluateCommand(cmd)
     unistd.close(prog_in)
+
     if operator ~= "|" then unistd.close(prog_out) end
     if not result then
+      if finalInput then unistd.close(finalInput) end
+      if finalOutput then unistd.close(finalOutput) end
       return nil, err
-    elseif result ~= 0 then
-      return nil, "nonzero exit status"
+    else
+      last_result = result
     end
     i = i + 1
   end
+
+  if flags and flags.output then
+    unistd.close(finalInput)
+    local output = ""
+    repeat
+      local chunk = unistd.read(finalOutput, 2048)
+      output = output .. (chunk or "")
+    until #chunk == 0 or not chunk
+    unistd.close(finalOutput)
+    return last_result, output
+  end
+
+  return last_result
 end
 
+-- Takes a set of tokens and evaluates them.  This is where things like
+-- flow control happen.
 local function evaluateTokens(tokens)
   local i = 1
   local currentCommand = {}
@@ -302,7 +397,7 @@ local function evaluateTokens(tokens)
 
     if token == "if" or token == "elseif" then
       local command
-      i, command = readTo(tokens, i, "then")
+      i, command = readTo(tokens, i+1, "then")
 
       if tokens[i-1] ~= "then" then
         writeError("missing 'then' near '%s'", tokens[i - 1])
@@ -310,11 +405,28 @@ local function evaluateTokens(tokens)
       end
 
       local result, _err = evaluateCommandChain(command)
+
       if _err then writeError(_err) end
 
       if result ~= 0 then
         i = seekBalanced(tokens, i, "else", "elseif", "end")
         if tokens[i-1] == "elseif" then i = i - 1 end
+
+        if tokens[i-1] == "else" then
+          local elseblock
+          i, elseblock = seekBalanced(tokens, i, "end")
+
+          local _result, __err = evaluateTokens(elseblock)
+          if not _result then return nil, __err end
+        end
+
+      else
+        local ifblock
+        i, ifblock = seekBalanced(tokens, i, "else", "elseif", "end")
+        if tokens[i-1] ~= "end" then i = seekBalanced(tokens, i, "end") end
+
+        local _result, __err = evaluateTokens(ifblock)
+        if not _result then return nil, __err end
       end
 
     elseif token == "else" then
@@ -329,7 +441,7 @@ local function evaluateTokens(tokens)
 
     elseif token == "for" then
       local command
-      i, command = readTo(tokens, i, "do")
+      i, command = readTo(tokens, i+1, "do")
 
       local varname = table.remove(command, 1)
       if table.remove(command, 1) ~= "in" then
@@ -346,7 +458,7 @@ local function evaluateTokens(tokens)
 
         for line in output:gmatch("[^\n]+") do
           stdlib.setenv(varname, line)
-          local _result = evaluateTokens(forblock)
+          local _result, _err = evaluateTokens(forblock)
           if not _result then break end
         end
 
@@ -362,12 +474,14 @@ local function evaluateTokens(tokens)
     elseif token == "end" then
       return writeError(unexpected("end", tokens[i-1]))
 
-    elseif token == ";" or token == "\n" or i == #tokens then
-      if #currentCommand == 0 and token == ";" then
+    elseif token == "SPLIT;SPLIT" or token == "SPLIT\nSPLIT" or
+        i == #tokens then
+      if #currentCommand == 0 and token == "SPLIT;SPLIT" then
         return writeError(unexpected(";", tokens[i-1]))
       end
 
-      if i == #tokens and token ~= ";" and token ~= "\n" then
+      if i == #tokens and token ~= "SPLIT;SPLIT" and
+          token ~= "SPLIT\nSPLIT" then
         currentCommand[#currentCommand+1] = token
       end
 
@@ -391,9 +505,18 @@ local function evaluateTokens(tokens)
 
     i = i + 1
   end
+
+  return true
 end
 
+-- Takes a chunk and evaluates it.
 local function evaluateChunk(chunk)
+  chunk = chunk
+    -- strip spaces at the beginning
+    :gsub("^ *", "")
+    -- strip comments
+    :gsub("#[^\n]*", "")
+  if #chunk == 0 then return end
   local tokens, err = tokenize(chunk)
   if not tokens then
     writeError(err)
@@ -401,6 +524,23 @@ local function evaluateChunk(chunk)
   end
   return evaluateTokens(tokens)
 end
+
+function builtins.source(argt)
+  if #argt == 0 then
+    writeError("usage: source filename")
+    return 1
+  end
+  local handle, err = io.open(argt[1], "r")
+  if not handle then
+    writeError(err)
+    return 1
+  end
+  local data = handle:read("a")
+  handle:close()
+  return evaluateChunk(data) and 0 or 1
+end
+builtins["."] = builtins.source
+builtins[":"] = function() end
 
 local history = {}
 local hist = io.open(os.getenv("HOME").."/.vbls_history", "r")
@@ -415,7 +555,28 @@ if opts.c then
   return evaluateChunk(opts.c)
 end
 
-local _rl_opts = { history = history }
+local to_source
+if opts.login then
+  to_source = stdlib.realpath(os.getenv("HOME").."/.profile")
+else
+  to_source = stdlib.realpath(os.getenv("HOME").."/.vblsrc")
+end
+
+if to_source then
+  builtins.source({to_source})
+end
+
+local _rl_opts = { history = history, exit = function()
+  -- save history on shell exit
+  local handle, err = io.open(os.getenv("HOME").."/.vbls_history", "w")
+  if not handle then
+    writeError("could not save history: %s", err)
+  else
+    handle:write(table.concat(history, "\n"))
+    handle:close()
+  end
+  os.exit()
+end }
 while true do
   io.write("% ")
   evaluateChunk(readline(_rl_opts))
