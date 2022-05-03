@@ -1,4 +1,4 @@
-#!/usr/bin/env lua
+--!lua
 -----------------------------------
 -- The Vaguely Bourne-Like Shell --
 --   by the ULOS 2 Developers    --
@@ -8,33 +8,18 @@
 
 local _VBLS_VERSION = "1.0.0"
 
-local argv = require("argv").command("vbls", ...)
+local argv = {...}
 
 local fork
-local stat = require("posix.sys.stat")
-local errno = require("posix.errno")
-local stdio = require("posix.stdio")
-local stdlib = require("posix.stdlib")
 local unistd = require("posix.unistd")
-local readline = require("readline")
-
-local args, opts = require("getopt").getopt({
-  opts = {
-    h = false, help = false,
-    c = true, login = false,
-    e = false, x = false,
-  },
-  allow_finish = true,
-  exit_on_bad_opt = true,
-  help_message = argv[0] .. ": pass '--help' for usage information\n"
-})
 
 -- this is how we detect running under ULOS 2.
 -- Mostly used to select which fork() to use.
-if type(argv) == "table" then
+if type(argv[1]) == "table" then
   argv = argv[1]
   fork = require("syscalls").fork
 else
+  argv[0] = "vbls"
   local _fork = unistd.fork
   fork = function(func)
     local pid, _, _errno = _fork()
@@ -49,6 +34,23 @@ else
     end
   end
 end
+
+local stat = require("posix.sys.stat")
+local wait = require("posix.sys.wait").wait
+local errno = require("posix.errno")
+local stdlib = require("posix.stdlib")
+local readline = require("readline")
+
+local args, opts = require("getopt").getopt({
+  options = {
+    h = false, help = false,
+    c = true, login = false,
+    e = false, x = false,
+  },
+  allow_finish = true,
+  exit_on_bad_opt = true,
+  help_message = argv[0] .. ": pass '--help' for usage information\n"
+}, argv)
 
 local defaultPath = "/bin:/sbin:/usr/bin"
 
@@ -65,6 +67,7 @@ for i=1, #args, 1 do
   stdlib.setenv(tostring(i), tostring(args[i]))
 end
 stdlib.setenv("VBLS_VERSION", _VBLS_VERSION)
+stdlib.setenv("HOME", "/", true)
 
 local function subFindCommand(path, name)
   local test1 = stdlib.realpath(path .. "/" .. name)
@@ -86,6 +89,10 @@ local function findCommand(name)
   local path = os.getenv("PATH") or defaultPath
   if shopts.cachepaths and commandPaths[name] then
     return commandPaths[name] end
+
+  if name:find("/", nil, true) then
+    return name
+  end
 
   for search in path:gmatch("[^:]+") do
     local statx, cpath = subFindCommand(search, name)
@@ -129,18 +136,18 @@ local function tokenize(chunk)
           tokens[#tokens] = tokens[#tokens] .. c
         end
 
-      else
-        if c == ";" or c == "\n" then
-          if #tokens[#tokens] > 0 then
-            tokens[#tokens+1] = c
+      elseif c == ";" or c == "\n" then
+        if #tokens[#tokens] > 0 then
+          tokens[#tokens+1] = c
 
-          else
-            tokens[#tokens] = c
-          end
-
-          tokens[#tokens+1] = ""
+        else
+          tokens[#tokens] = c
         end
 
+        tokens[#tokens+1] = ""
+
+      else
+        tokens[#tokens] = tokens[#tokens] .. c
       end
     end
 
@@ -215,14 +222,34 @@ end
 local separatorOperators = { ["|"] = true, ["||"] = true,
   ["&&"] = true }
 
+-- TODO: builtin commands
 local function evaluateCommand(command)
-  local path = findCommand(command[1])
-  fork(function()end)
+  local path, err = findCommand(command[1])
+  if not path then return nil, err end
+
+  local argt = {table.unpack(command, 2)}
+  argt[0] = command[1]
+
+  local pid = fork(function()
+    if command.input then
+      unistd.dup2(command.input, 0)
+      unistd.close(command.input)
+    end
+    if command.output then
+      unistd.dup2(command.output, 1)
+      unistd.close(command.output)
+    end
+    local _, _err, _errno = unistd.exec(path, argt)
+    io.stderr:write(("vbls: %s: %s\n"):format(path, _err))
+    os.exit(_errno)
+  end)
+
+  local _, _, status = wait(pid)
+  return status
 end
 
 local function evaluateCommandChain(tokens)
   local commands = {{}}
-  local inpipe, outpipe = unistd.pipe()
 
   for i=1, #tokens, 1 do
     if separatorOperators[tokens[i]] then
@@ -245,15 +272,18 @@ local function evaluateCommandChain(tokens)
   local i = 1
   while commands[i] do
     local cmd = commands[i]
+    local prog_out, prog_in = unistd.pipe()
     i = i + 1
 
     local operator = commands[i]
     if operator == "|" then
-      cmd.output = infd
-      commands[#commands+1].input = outfd
+      cmd.output = prog_out
+      commands[#commands+1].input = prog_in
     end
 
-    evaluateCommand(cmd)
+    local result, err = evaluateCommand(cmd)
+    unistd.close(prog_out)
+    unistd.close(prog_in)
     i = i + 1
   end
 end
@@ -327,9 +357,13 @@ local function evaluateTokens(tokens)
     elseif token == "end" then
       return writeError(unexpected("end", tokens[i-1]))
 
-    elseif token == ";" or token == "\n" then
+    elseif token == ";" or token == "\n" or i == #tokens then
       if #currentCommand == 0 and token == ";" then
         return writeError(unexpected(";", tokens[i-1]))
+      end
+
+      if i == #tokens and token ~= ";" and token ~= "\n" then
+        currentCommand[#currentCommand+1] = token
       end
 
       if #currentCommand > 0 then
@@ -337,6 +371,7 @@ local function evaluateTokens(tokens)
         currentCommand = {}
 
         if result ~= 0 and shopts.errexit then
+          os.exit(1)
           return
         end
       end
@@ -367,7 +402,12 @@ if hist then
   hist:close()
 end
 
+if opts.c then
+  return evaluateChunk(opts.c)
+end
+
 local _rl_opts = { history = history }
 while true do
+  io.write("% ")
   evaluateChunk(readline(_rl_opts))
 end
