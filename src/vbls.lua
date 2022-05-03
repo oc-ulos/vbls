@@ -6,11 +6,14 @@
 --
 -- This shell should work both on Linux and on ULOS 2.
 
+local _VBLS_VERSION = "1.0.0"
+
 local argv = require("argv").command("vbls", ...)
 
 local fork
 local stat = require("posix.sys.stat")
 local errno = require("posix.errno")
+local stdio = require("posix.stdio")
 local stdlib = require("posix.stdlib")
 local unistd = require("posix.unistd")
 local readline = require("readline")
@@ -55,6 +58,13 @@ local shopts = {
   errexit = false,
   showcommands = false
 }
+
+-- some default environment setup
+stdlib.setenv("0", argv[0])
+for i=1, #args, 1 do
+  stdlib.setenv(tostring(i), tostring(args[i]))
+end
+stdlib.setenv("VBLS_VERSION", _VBLS_VERSION)
 
 local function subFindCommand(path, name)
   local test1 = stdlib.realpath(path .. "/" .. name)
@@ -144,11 +154,19 @@ local function tokenize(chunk)
   return tokens
 end
 
-local function writeError(err)
+local function writeError(err, ...)
   io.stdout:flush()
   if type(err) == "number" then err = errno.errno(err) end
-  io.stderr:write("vbls: ", err, "\n")
+  io.stderr:write("vbls: ", string.format(err, ...), "\n")
   io.stderr:flush()
+end
+
+local function unexpected(token, near)
+  if near then
+    return string.format("unexpected '%s' near '%s'", token, near)
+  else
+    return string.format("unexpected '%s'", token)
+  end
 end
 
 local increase = {["if"] = true, ["for"] = true, ["while"] = true}
@@ -193,10 +211,58 @@ local function readTo(tokens, i, tok)
   return i, result
 end
 
+-- backgrounding with & is not yet supported; no job control
+local separatorOperators = { ["|"] = true, ["||"] = true,
+  ["&&"] = true }
+
+local function evaluateCommand(command)
+  local path = findCommand(command[1])
+  fork(function()end)
+end
+
+local function evaluateCommandChain(tokens)
+  local commands = {{}}
+  local inpipe, outpipe = unistd.pipe()
+
+  for i=1, #tokens, 1 do
+    if separatorOperators[tokens[i]] then
+      if #commands[#commands] == 0 then
+        return nil, unexpected(tokens[i], tokens[i-1])
+      end
+
+      commands[#commands+1] = tokens[i]
+      commands[#commands+1] = {}
+
+    else
+      table.insert(commands[#commands], tokens[i])
+    end
+  end
+
+  if type(commands[#commands]) ~= "table" or #commands[#commands] == 0 then
+    return nil, "expected command near <eof>"
+  end
+
+  local i = 1
+  while commands[i] do
+    local cmd = commands[i]
+    i = i + 1
+
+    local operator = commands[i]
+    if operator == "|" then
+      cmd.output = infd
+      commands[#commands+1].input = outfd
+    end
+
+    evaluateCommand(cmd)
+    i = i + 1
+  end
+end
+
 local function evaluateTokens(tokens)
   local i = 1
+  local currentCommand = {}
 
-  while true do
+  while tokens[i] do
     local token = tokens[i]
 
     if token == "if" or token == "elseif" then
@@ -204,7 +270,7 @@ local function evaluateTokens(tokens)
       i, command = readTo(tokens, i, "then")
 
       if tokens[i] ~= "then" then
-        writeError("missing 'then' near " .. tokens[i - 1])
+        writeError("missing 'then' near '%s'", tokens[i - 1])
         return
       end
 
@@ -213,15 +279,18 @@ local function evaluateTokens(tokens)
 
       if result ~= 0 then
         i = seekBalanced(tokens, i, "else", "elseif", "end")
+        if tokens[i-1] == "elseif" then i = i - 1 end
       end
 
     elseif token == "else" then
-      if tokens[i-1] then
-        writeError("unexpected 'else' near '"..tokens[i-1].."'")
+      local _i = seekBalanced(tokens, i, "end")
+
+      if not _i then
+        return writeError(unexpected("else", tokens[i-1]))
+
       else
-        writeError("unexpected 'else'")
+        i = _i
       end
-      return
 
     elseif token == "for" then
       local command
@@ -229,7 +298,7 @@ local function evaluateTokens(tokens)
 
       local varname = table.remove(command, 1)
       if table.remove(command, 1) ~= "in" then
-        return writeError("expected 'in' near '" .. tokens[i-1] .. "'")
+        return writeError("expected 'in' near '%s'", tokens[i-1])
       end
 
       local result, output = evaluateCommandChain(command,
@@ -248,7 +317,7 @@ local function evaluateTokens(tokens)
 
         stdlib.setenv(varname, old)
       else
-        return
+        return writeError(output)
       end
 
     elseif token == "while" then
@@ -256,12 +325,24 @@ local function evaluateTokens(tokens)
       i, command = readTo(tokens, i, "do")
 
     elseif token == "end" then
-      if tokens[i-1] then
-        writeError("unexpected 'end' near '"..tokens[i-1].."'")
-      else
-        writeError("unexpected 'end'")
+      return writeError(unexpected("end", tokens[i-1]))
+
+    elseif token == ";" or token == "\n" then
+      if #currentCommand == 0 and token == ";" then
+        return writeError(unexpected(";", tokens[i-1]))
       end
-      return
+
+      if #currentCommand > 0 then
+        local result, err = evaluateCommandChain(currentCommand)
+        currentCommand = {}
+
+        if result ~= 0 and shopts.errexit then
+          return
+        end
+      end
+
+    else
+      currentCommand[#currentCommand+1] = token
     end
 
     i = i + 1
