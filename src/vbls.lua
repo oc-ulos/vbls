@@ -107,6 +107,55 @@ function builtins.echo(argt, _, output)
   return 0
 end
 
+function builtins.cd(argt)
+  local to
+
+  if #argt == 0 then
+    if not os.getenv("HOME") then
+      writeError("cd: HOME not set")
+      return 1
+
+    else
+      to = os.getenv("HOME") or "/"
+    end
+
+  elseif #argt > 1 then
+    writeError("cd: too many arguments")
+    return 1
+
+  elseif argt[1] == "-" then
+    if not os.getenv("OLDPWD") then
+      writeError("cd: OLDPWD not set")
+      return 1
+
+    else
+      to = os.getenv("OLDPWD")
+    end
+
+  else
+    to = argt[1]
+  end
+
+  local eno
+  to, eno = stdlib.realpath(to)
+
+  if not to then
+    writeError("cd: %s: %s", to, eno)
+  end
+
+  local oldwd = unistd.getcwd()
+  local ok, err = unistd.chdir(to)
+  if not ok then
+    writeError("cd: %s: %s", to, err)
+    return 1
+  end
+
+  stdlib.setenv("OLDPWD", oldwd)
+  stdlib.setenv("PWD", to)
+
+  return 0
+end
+
 local function subFindCommand(path, name)
   local test1 = stdlib.realpath(path .. "/" .. name)
   local test2 = stdlib.realpath(path .. "/" .. name .. ".lua")
@@ -410,6 +459,11 @@ local function evaluateTokens(tokens)
 
       if result ~= 0 then
         i = seekBalanced(tokens, i, "else", "elseif", "end")
+
+        if not i then
+          return writeError("could not find matching else/elseif/end")
+        end
+
         if tokens[i-1] == "elseif" then i = i - 1 end
 
         if tokens[i-1] == "else" then
@@ -543,17 +597,22 @@ builtins["."] = builtins.source
 builtins[":"] = function() end
 
 local history = {}
-local hist = io.open(os.getenv("HOME").."/.vbls_history", "r")
-if hist then
-  for line in hist:lines() do
-    history[#history + 1] = line
+if os.getenv("HOME") then
+  local hist = io.open(os.getenv("HOME").."/.vbls_history", "r")
+  if hist then
+    for line in hist:lines() do
+      history[#history + 1] = line
+    end
+    hist:close()
   end
-  hist:close()
 end
 
 if opts.c then
   return evaluateChunk(opts.c)
 end
+
+local profile = stdlib.realpath("/etc/profile")
+if profile then builtins.source{"/etc/profile"} end
 
 local to_source
 if opts.login then
@@ -563,7 +622,7 @@ else
 end
 
 if to_source then
-  builtins.source({to_source})
+  builtins.source{to_source}
 end
 
 local _rl_opts = { history = history, exit = function()
@@ -577,6 +636,7 @@ local _rl_opts = { history = history, exit = function()
   end
   os.exit()
 end }
+
 while true do
   io.write("% ")
   evaluateChunk(readline(_rl_opts))
