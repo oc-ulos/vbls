@@ -104,11 +104,7 @@ local function writeError(err, ...)
 end
 
 local function unexpected(token, near)
-  if near then
-    return string.format("unexpected '%s' near '%s'", token, near)
-  else
-    return string.format("unexpected '%s'", token)
-  end
+  return string.format("unexpected '%s' near '%s'", token, near or "<EOF>")
 end
 
 
