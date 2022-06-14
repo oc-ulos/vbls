@@ -863,10 +863,18 @@ if to_source then
 end
 
 local utsname = require("posix.sys.utsname")
+
+local function proc_cwd(dir)
+  if dir:sub(1,#home_dir) == home_dir then
+    dir = "~"..dir:sub(#home_dir+1)
+  end
+  return dir
+end
+
 local function prompt(p)
   return (p
-    :gsub("\\W", libgen.basename(unistd.getcwd()))
-    :gsub("\\w", unistd.getcwd())
+    :gsub("\\W", libgen.basename(proc_cwd(unistd.getcwd())))
+    :gsub("\\w", proc_cwd(unistd.getcwd()))
     :gsub("\\h", utsname.uname().sysname)
     :gsub("\\v", _VBLS_VERSION)
     :gsub("\\s", "vbls")
