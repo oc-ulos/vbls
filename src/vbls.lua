@@ -84,18 +84,8 @@ local shopts = {
   showcommands = not not opts.x
 }
 
--- some default environment setup
-stdlib.setenv("0", argv[0])
-for i=1, #args, 1 do
-  stdlib.setenv(tostring(i), tostring(args[i]))
-end
-stdlib.setenv("VBLS_VERSION", _VBLS_VERSION)
-stdlib.setenv("HOME", os.getenv("HOME") or "/")
-stdlib.setenv("SHLVL",
-  tostring(math.floor(tonumber(os.getenv("SHLVL") or 0) + 1)))
-stdlib.setenv("PWD", unistd.getcwd())
+local home_dir
 
--- builtins
 local function writeError(err, ...)
   io.stdout:flush()
   if type(err) == "number" then err = errno.errno(err) end
@@ -103,18 +93,64 @@ local function writeError(err, ...)
   io.stderr:flush()
 end
 
+-- some default environment setup
+stdlib.setenv("0", argv[0])
+for i=1, #args, 1 do
+  stdlib.setenv(tostring(i), tostring(args[i]))
+end
+stdlib.setenv("VBLS_VERSION", _VBLS_VERSION)
+
+if opts.login then
+  local home = require("posix.pwd").getpwuid(unistd.getuid())
+  home = home and home.pw_dir or "/"
+  stdlib.setenv("HOME", home)
+  if not require("posix.sys.stat").stat(home) then
+    writeError("warning: home directory does not exist")
+  else
+    unistd.chdir(home)
+  end
+else
+  stdlib.setenv("HOME", os.getenv("HOME") or "/")
+end
+
+home_dir = stdlib.getenv("HOME")
+
+stdlib.setenv("SHLVL",
+  tostring(math.floor(tonumber(os.getenv("SHLVL") or 0) + 1)))
+stdlib.setenv("PWD", unistd.getcwd())
+
 local function unexpected(token, near)
   return string.format("unexpected '%s' near '%s'", token, near or "<EOF>")
 end
 
 
+-- builtins
 local builtins = {}
---local aliases = {}
+local aliases = {}
 
-function builtins.alias()
+function builtins.alias(argt)
+  if #argt == 0 then
+    for k,v in pairs(aliases) do print(k.."='"..v.."'") end
+  elseif #argt == 1 then
+    if aliases[argt[1]] then
+      print(aliases[argt[1]])
+    end
+  elseif #argt == 2 then
+    aliases[argt[1]] = argt[2]
+  else
+    writeError("usage: alias [name [program]]")
+    return 1
+  end
+  return 0
 end
 
-function builtins.unalias()
+function builtins.unalias(argt)
+  if #argt == 0 then
+    writeError("usage: unalias name")
+    return 1
+  end
+  aliases[argt[1]] = nil
+  return 0
 end
 
 function builtins.printf(argt, input, output)
@@ -602,6 +638,17 @@ local function evaluateCommandChain(tokens, flags)
   return last_result
 end
 
+local function append(currentCommand, token)
+  if #currentCommand == 0 and aliases[token] then
+    local bits = tokenize(aliases[token])
+    for k=1, #bits, 1 do
+      currentCommand[#currentCommand+1] = bits[k]
+    end
+  else
+    currentCommand[#currentCommand+1] = token
+  end
+end
+
 -- Takes a set of tokens and evaluates them.  This is where things like
 -- flow control happen.
 local function evaluateTokens(tokens, captureOutput)
@@ -634,11 +681,13 @@ local function evaluateTokens(tokens, captureOutput)
           return writeError("could not find matching else/elseif/end")
         end
 
-        if tokens[i-1] == "elseif" then i = i - 1 end
+        if tokens[i-1] == "elseif" or tokens[i-1] == "end" then
+          i = i - 1
 
-        if tokens[i-1] == "else" then
+        elseif tokens[i-1] == "else" then
           local elseblock
           i, elseblock = seekBalanced(tokens, i, "end")
+          i = i - 1
 
           local _result, __err = evaluateTokens(elseblock, captureOutput)
           if not _result then return nil, __err end
@@ -653,7 +702,13 @@ local function evaluateTokens(tokens, captureOutput)
           return writeError("could not find matching else/elseif/end")
         end
 
-        if tokens[i-1] ~= "end" then i = seekBalanced(tokens, i, "end") end
+        if tokens[i-1] ~= "end" then
+          i = seekBalanced(tokens, i, "end")
+          i = i - 1
+
+        else
+          i = i - 1
+        end
 
         local _result, __err = evaluateTokens(ifblock, captureOutput)
         if not _result then return nil, __err end
@@ -718,7 +773,7 @@ local function evaluateTokens(tokens, captureOutput)
 
       if i == #tokens and token ~= "SPLIT;SPLIT" and
           token ~= "SPLIT\nSPLIT" then
-        currentCommand[#currentCommand+1] = token
+        append(currentCommand, token)
       end
 
       if #currentCommand > 0 then
@@ -738,7 +793,7 @@ local function evaluateTokens(tokens, captureOutput)
       end
 
     else
-      currentCommand[#currentCommand+1] = token
+      append(currentCommand, token)
     end
 
     i = i + 1
