@@ -875,7 +875,7 @@ local function prompt(p)
   return (p
     :gsub("\\W", libgen.basename(proc_cwd(unistd.getcwd())))
     :gsub("\\w", proc_cwd(unistd.getcwd()))
-    :gsub("\\h", utsname.uname().sysname)
+    :gsub("\\h", utsname.uname().nodename)
     :gsub("\\v", _VBLS_VERSION)
     :gsub("\\s", "vbls")
     :gsub("\\u", os.getenv("USER"))
