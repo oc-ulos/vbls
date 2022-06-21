@@ -12,6 +12,7 @@ local argv = {...}
 
 local fork
 local unistd = require("posix.unistd")
+local signal = require("posix.signal")
 
 -- this is how we detect running under ULOS 2.
 -- Mostly used to select which fork() to use.
@@ -84,7 +85,7 @@ local shopts = {
   showcommands = not not opts.x
 }
 
-local home_dir
+local home_dir, interactive
 
 local function writeError(err, ...)
   io.stdout:flush()
@@ -531,6 +532,7 @@ local function evaluateCommand(command)
   if builtins[argt[0]] then
     return builtins[argt[0]](argt, command.input, command.output)
   else
+    local old = unistd.getpgrp()
     local pid = fork(function()
       if command.input then
         assert(unistd.dup2(command.input, 0))
@@ -541,7 +543,17 @@ local function evaluateCommand(command)
         --unistd.close(command.output)
       end
 
+      if interactive then
+        unistd.tcsetpgrp(2, unistd.getpid())
+        unistd.setpid("p", unistd.getpid(), unistd.getpid())
+      end
+
       local _, _err, _errno = unistd.exec(path, argt)
+
+      if interactive then
+        unistd.tcsetpgrp(2, old)
+        unistd.setpid("p", unistd.getpid(), old)
+      end
       io.stderr:write(("vbls: %s: %s\n"):format(path, _err))
       os.exit(_errno)
     end)
@@ -549,6 +561,13 @@ local function evaluateCommand(command)
     if command.input then unistd.close(command.input) end
 
     local _, _, status = wait(pid)
+
+    if interactive then
+      unistd.setpid("p", unistd.getpid(), pid)
+      unistd.tcsetpgrp(2, old)
+      unistd.setpid("p", unistd.getpid(), old)
+    end
+
     return status
   end
 end
@@ -848,6 +867,8 @@ if opts.c then
   return evaluateChunk(opts.c)
 end
 
+interactive = true
+
 local profile = stdlib.realpath("/etc/profile")
 if profile then builtins.source{"/etc/profile"} end
 
@@ -894,6 +915,9 @@ local _rl_opts = { history = history, exit = function()
   os.exit()
 end }
 
+signal.signal(signal.SIGTTIN, signal.SIG_IGN)
+signal.signal(signal.SIGTTOU, signal.SIG_IGN)
+signal.signal(signal.SIGTSTP, signal.SIG_IGN)
 while true do
   io.write(prompt(os.getenv("PS1") or "% "))
   evaluateChunk(readline(_rl_opts))
