@@ -11,6 +11,7 @@ local _VBLS_VERSION = "1.0.0"
 local argv = {...}
 
 local fork
+local glob = require("posix.glob")
 local unistd = require("posix.unistd")
 local signal = require("posix.signal")
 
@@ -511,6 +512,17 @@ local function evaluateCommand(command)
 
     elseif command[i] == "SPLIT;SPLIT" then
       table.remove(command, i)
+
+    elseif command[i]:find("[%*%?]") or command[i]:find("%[[^%[%]]%]") then
+      local results = glob.glob(command[i], 0)
+      if results then
+        table.remove(command, i)
+        for n=#results, 1, -1 do
+          table.insert(command, i, results[n])
+        end
+      else
+        i = i + 1
+      end
 
     else
       command[i] = command[i]:gsub("%$(%b{})", function(v)
