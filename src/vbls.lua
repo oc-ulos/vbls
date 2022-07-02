@@ -286,6 +286,14 @@ function builtins.builtins(_, _, output)
   return 0
 end
 
+function builtins.exit(argt)
+  if #argt == 0 then
+    os.exit(0)
+  else
+    os.exit(tonumber(argt[1]))
+  end
+end
+
 local function subFindCommand(path, name)
   local test1 = stdlib.realpath(path .. "/" .. name)
   local test2 = stdlib.realpath(path .. "/" .. name .. ".lua")
