@@ -106,11 +106,14 @@ if opts.login then
   local home = require("posix.pwd").getpwuid(unistd.getuid())
   home = home and home.pw_dir or "/"
   stdlib.setenv("HOME", home)
+
   if not require("posix.sys.stat").stat(home) then
     writeError("warning: home directory does not exist")
+
   else
     unistd.chdir(home)
   end
+
 else
   stdlib.setenv("HOME", os.getenv("HOME") or "/")
 end
@@ -133,16 +136,20 @@ local aliases = {}
 function builtins.alias(argt)
   if #argt == 0 then
     for k,v in pairs(aliases) do print(k.."='"..v.."'") end
+
   elseif #argt == 1 then
     if aliases[argt[1]] then
       print(aliases[argt[1]])
     end
+
   elseif #argt == 2 then
     aliases[argt[1]] = argt[2]
+
   else
     writeError("usage: alias [name [program]]")
     return 1
   end
+
   return 0
 end
 
@@ -151,6 +158,7 @@ function builtins.unalias(argt)
     writeError("usage: unalias name")
     return 1
   end
+
   aliases[argt[1]] = nil
   return 0
 end
@@ -160,23 +168,28 @@ function builtins.printf(argt, input, output)
     writeError("usage: printf format [arguments]")
     return 1
   end
+
   local ok, err = pcall(string.format, table.unpack(argt))
   if ok then
     builtins.echo({err}, input, output)
+
   else
     writeError("printf: %s", err)
     return 1
   end
+
   return 0
 end
 
 function builtins.echo(argt, _, output)
   output = output or 1
   local outstr = ""
+
   for i=1, #argt, 1 do
     outstr = outstr .. tostring(argt[i])
     if i < #argt then outstr = outstr .. " " end
   end
+
   unistd.write(output, outstr.."\n")
   return 0
 end
@@ -185,9 +198,11 @@ end
 function builtins.echo_nl(argt, _, output)
   output = output or 1
   local outstr = ""
+
   for i=1, #argt, 1 do
     outstr = outstr .. tostring(argt[i]) .. "\n"
   end
+
   unistd.write(output, outstr)
   return 0
 end
@@ -200,6 +215,7 @@ function builtins.set(argt)
         return "\\" .. string.char(cc:byte() + 96)
       end))
     end
+
   else
     local _args, _opts = require("getopt").getopt({ options={},
       allow_finish=true }, argt)
@@ -264,6 +280,7 @@ function builtins.cd(argt)
 
   local oldwd = unistd.getcwd()
   local ok, err = unistd.chdir(realto)
+
   if not ok then
     writeError("cd: %s: %s", to, err)
     return 1
@@ -300,8 +317,10 @@ local function subFindCommand(path, name)
 
   if test1 then
     return test1
+
   elseif test2 then
     return test2
+
   else
     return nil
   end
@@ -319,6 +338,7 @@ local function findCommand(name)
 
   for search in path:gmatch("[^:]+") do
     local cpath = subFindCommand(search, name)
+
     if cpath then
       if shopts.cachepath then commandPaths[name] = cpath end
       return cpath
@@ -350,6 +370,7 @@ local function tokenize(chunk)
   for c in chunk:gmatch(".") do
     if in_comment then
       in_comment = c ~= "\n"
+
       if #tokens[#tokens] > 0 then
         tokens[#tokens+1] = ""
       end
@@ -359,6 +380,7 @@ local function tokenize(chunk)
         if escapes[c] then
           tokens[#tokens] = tokens[#tokens] .. escapes[c]
           c = "ESCAPED"
+
         else
           tokens[#tokens] = tokens[#tokens] .. "\\" .. c
         end
@@ -458,11 +480,14 @@ local function seekBalanced(tokens, i, ...)
   repeat
     local _token = tokens[i]
     i = i + 1
+
     if increase[_token] then
       level = level + 1
+
     elseif decrease[_token] then
       level = level - 1
     end
+
     if not seekTo[_token] then passed[#passed+1] = _token end
   until (seekTo[_token] and level <= 1) or not _token
 
@@ -525,9 +550,11 @@ local function evaluateCommand(command)
       local results = glob.glob(command[i], 0)
       if results then
         table.remove(command, i)
+
         for n=#results, 1, -1 do
           table.insert(command, i, results[n])
         end
+
       else
         i = i + 1
       end
@@ -551,6 +578,7 @@ local function evaluateCommand(command)
 
   if builtins[argt[0]] then
     return builtins[argt[0]](argt, command.input, command.output)
+
   else
     local old = unistd.getpgrp()
     local pid = fork(function()
@@ -558,6 +586,7 @@ local function evaluateCommand(command)
         assert(unistd.dup2(command.input, 0))
         --unistd.close(command.input)
       end
+
       if command.output then
         assert(unistd.dup2(command.output, 1))
         --unistd.close(command.output)
@@ -627,6 +656,7 @@ local function evaluateCommandChain(tokens, flags)
 
   local i = 1
   local last_result = 0
+
   while commands[i] do
     local cmd = commands[i]
     local prog_out, prog_in = unistd.pipe()
@@ -646,13 +676,16 @@ local function evaluateCommandChain(tokens, flags)
       if finalInput then unistd.close(finalInput) end
       if finalOutput then unistd.close(finalOutput) end
       return nil, err
+
     else
       if operator == "||" then
         if last_result == 0 or result == 0 then
           last_result = 0
+
         else
           last_result = result
         end
+
       else
         last_result = result
         if operator == "&&" and result ~= 0 then
@@ -660,16 +693,19 @@ local function evaluateCommandChain(tokens, flags)
         end
       end
     end
+
     i = i + 1
   end
 
   if flags and flags.output then
     unistd.close(finalInput)
     local output = ""
+
     repeat
       local chunk = unistd.read(finalOutput, 2048)
       output = output .. (chunk or "")
     until #chunk == 0 or not chunk
+
     unistd.close(finalOutput)
     return last_result, output
   end
@@ -683,6 +719,7 @@ local function append(currentCommand, token)
     for k=1, #bits, 1 do
       currentCommand[#currentCommand+1] = bits[k]
     end
+
   else
     currentCommand[#currentCommand+1] = token
   end
@@ -822,6 +859,7 @@ local function evaluateTokens(tokens, captureOutput)
         if result ~= 0 then
           if shopts.errexit then
             os.exit(1)
+
           else
             if err then writeError("%s", err) end
             return
@@ -846,12 +884,15 @@ evaluateChunk = function(chunk, captureOutput)
   chunk = chunk
     -- strip spaces at the beginning
     :gsub("^ *", "")
+
   if #chunk == 0 then return end
   local tokens, err = tokenize(chunk)
+
   if not tokens then
     writeError(err)
     return
   end
+
   return evaluateTokens(tokens, captureOutput)
 end
 
@@ -860,15 +901,18 @@ function builtins.source(argt)
     writeError("usage: source filename")
     return 1
   end
+
   local handle, err = io.open(argt[1], "r")
   if not handle then
     writeError(err)
     return 1
   end
+
   local data = handle:read("a")
   handle:close()
   return evaluateChunk(data) and 0 or 1
 end
+
 builtins["."] = builtins.source
 builtins[":"] = function() end
 
@@ -895,6 +939,7 @@ if profile then builtins.source{"/etc/profile"} end
 local to_source
 if opts.login then
   to_source = stdlib.realpath(os.getenv("HOME").."/.profile")
+
 else
   to_source = stdlib.realpath(os.getenv("HOME").."/.vblsrc")
 end
@@ -909,6 +954,7 @@ local function proc_cwd(dir)
   if dir:sub(1,#home_dir) == home_dir then
     dir = "~"..dir:sub(#home_dir+1)
   end
+
   return dir
 end
 
@@ -928,16 +974,19 @@ local _rl_opts = { history = history, exit = function()
   local handle, err = io.open(os.getenv("HOME").."/.vbls_history", "w")
   if not handle then
     writeError("could not save history: %s", err)
+
   else
     handle:write(table.concat(history, "\n"))
     handle:close()
   end
+
   os.exit()
 end }
 
 signal.signal(signal.SIGTTIN, signal.SIG_IGN)
 signal.signal(signal.SIGTTOU, signal.SIG_IGN)
 signal.signal(signal.SIGTSTP, signal.SIG_IGN)
+
 while true do
   io.write(prompt(os.getenv("PS1") or "% "))
   evaluateChunk(readline(_rl_opts))
