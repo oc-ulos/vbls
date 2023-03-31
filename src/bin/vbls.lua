@@ -103,7 +103,7 @@ end
 stdlib.setenv("VBLS_VERSION", _VBLS_VERSION)
 
 if opts.login then
-  local home = require("posix.pwd").getpwuid(unistd.getuid())
+  local home = require("posix.pwd").getpwuid(unistd.geteuid())
   home = home and home.pw_dir or "/"
   stdlib.setenv("HOME", home)
 
