@@ -37,6 +37,7 @@ else
   end
 end
 
+local stat = require("posix.sys.stat")
 local wait = require("posix.sys.wait").wait
 local errno = require("posix.errno")
 local libgen = require("posix.libgen")
@@ -107,7 +108,7 @@ if opts.login then
   home = home and home.pw_dir or "/"
   stdlib.setenv("HOME", home)
 
-  if not require("posix.sys.stat").stat(home) then
+  if not stat.stat(home) then
     writeError("warning: home directory does not exist")
 
   else
@@ -294,6 +295,30 @@ end
 
 function builtins.equals(argt)
   return argt[1] == argt[2] and 0 or 1
+end
+
+function builtins.umask(argt, _, output)
+  output = output or 1
+  local perms = require("permissions")
+
+  if not argt[1] then
+    writeError("umask: permission mask required")
+    return 1
+  end
+
+  local mask
+  if tonumber(argt[1]) then
+    mask = tonumber(argt[1])
+  else
+    mask = perms.strtobmp(argt[1])
+  end
+
+  if not mask then
+    writeError("umask: invalid permission mask")
+  end
+
+  unistd.write(output, tostring(mask).."\n")
+  stat.umask(mask)
 end
 
 function builtins.builtins(_, _, output)
