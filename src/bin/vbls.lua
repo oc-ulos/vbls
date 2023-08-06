@@ -301,6 +301,9 @@ function builtins.umask(argt, _, output)
   output = output or 1
   local perms = require("permissions")
 
+  local quiet = true
+  if argt[1] == "-s" then quiet = false table.remove(argt, 1) end
+
   if not argt[1] then
     writeError("umask: permission mask required")
     return 1
@@ -317,8 +320,10 @@ function builtins.umask(argt, _, output)
     writeError("umask: invalid permission mask")
   end
 
-  unistd.write(output, tostring(mask).."\n")
+  if not quiet then unistd.write(output, tostring(mask).."\n") end
   stat.umask(mask)
+
+  return 0
 end
 
 function builtins.builtins(_, _, output)
@@ -869,7 +874,7 @@ local function evaluateTokens(tokens, captureOutput)
     elseif token == "SPLIT;SPLIT" or token == "SPLIT\nSPLIT" or
         i == #tokens then
       if #currentCommand == 0 and token == "SPLIT;SPLIT" then
-        return writeError(unexpected(";", tokens[i-1]))
+        return writeError(unexpected(";", tokens[i-1]:gsub("SPLIT","")))
       end
 
       if i == #tokens and token ~= "SPLIT;SPLIT" and
