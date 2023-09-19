@@ -37,6 +37,7 @@ else
   end
 end
 
+local stat = require("posix.sys.stat")
 local wait = require("posix.sys.wait").wait
 local errno = require("posix.errno")
 local libgen = require("posix.libgen")
@@ -107,7 +108,7 @@ if opts.login then
   home = home and home.pw_dir or "/"
   stdlib.setenv("HOME", home)
 
-  if not require("posix.sys.stat").stat(home) then
+  if not stat.stat(home) then
     writeError("warning: home directory does not exist")
 
   else
@@ -236,7 +237,9 @@ function builtins.set(argt)
     if _opts.x or _opts.showcommand then shopts.showcommand = not _opts.n end
     if _opts.cachepaths then shopts.cachepaths = not _opts.n end
 
-    stdlib.setenv(_args[1], table.concat(_args, " ", 2))
+    if #_args > 1 then
+      stdlib.setenv(_args[1], table.concat(_args, " ", 2))
+    end
   end
 
   return 0
@@ -296,6 +299,35 @@ function builtins.equals(argt)
   return argt[1] == argt[2] and 0 or 1
 end
 
+function builtins.umask(argt, _, output)
+  output = output or 1
+  local perms = require("permissions")
+
+  local quiet = true
+  if argt[1] == "-s" then quiet = false table.remove(argt, 1) end
+
+  if not argt[1] then
+    writeError("umask: permission mask required")
+    return 1
+  end
+
+  local mask
+  if tonumber(argt[1]) then
+    mask = tonumber(argt[1])
+  else
+    mask = perms.strtobmp(argt[1])
+  end
+
+  if not mask then
+    writeError("umask: invalid permission mask")
+  end
+
+  if not quiet then unistd.write(output, tostring(mask).."\n") end
+  stat.umask(mask)
+
+  return 0
+end
+
 function builtins.builtins(_, _, output)
   local b = {}
   for k in pairs(builtins) do b[#b+1] = k end
@@ -348,7 +380,7 @@ local function findCommand(name)
   return nil, name .. ": command not found"
 end
 
-local whitespace = { [" "] = true, ["\n"] = true, ["\t"] = true }
+local whitespace = { [" "] = true, ["\n"] = false, ["\t"] = true }
 local escapes = {
   ["\\"] = "\\",
   n = "\n",
@@ -434,10 +466,10 @@ local function tokenize(chunk)
 
       elseif c == ";" or c == "\n" then
         if #tokens[#tokens] > 0 then
-          tokens[#tokens+1] = "SPLIT"..c.."SPLIT"
+          tokens[#tokens+1] = c
 
         else
-          tokens[#tokens] = "SPLIT"..c.."SPLIT"
+          tokens[#tokens] = c
         end
 
         tokens[#tokens+1] = ""
@@ -543,7 +575,7 @@ local function evaluateCommand(command)
 
       i = i + #insert
 
-    elseif command[i] == "SPLIT;SPLIT" then
+    elseif command[i] == ";" then
       table.remove(command, i)
 
     elseif command[i]:find("[%*%?]") or command[i]:find("%[[^%[%]]%]") then
@@ -568,6 +600,12 @@ local function evaluateCommand(command)
 
       i = i + 1
     end
+  end
+
+  if shopts.showcommand then
+    local c = ""
+    for n=1, #command do c = c .. tostring(command[n]) .. " " end
+    io.stderr:write("+ '", c, "'\n")
   end
 
   local path, err = findCommand(command[1])
@@ -841,14 +879,14 @@ local function evaluateTokens(tokens, captureOutput)
     elseif token == "end" then
       return writeError(unexpected("end", tokens[i-1]))
 
-    elseif token == "SPLIT;SPLIT" or token == "SPLIT\nSPLIT" or
+    elseif token == ";" or token == "\n" or
         i == #tokens then
-      if #currentCommand == 0 and token == "SPLIT;SPLIT" then
+      if #currentCommand == 0 and token == ";" then
         return writeError(unexpected(";", tokens[i-1]))
       end
 
-      if i == #tokens and token ~= "SPLIT;SPLIT" and
-          token ~= "SPLIT\nSPLIT" then
+      if i == #tokens and token ~= ";" and
+          token ~= "\n" then
         append(currentCommand, token)
       end
 
